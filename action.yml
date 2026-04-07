@@ -1,0 +1,58 @@
+name: "nono sandbox"
+description: "Run a command inside a nono sandbox with filesystem, network, and credential controls"
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  run:
+    description: "Command to execute inside the sandbox"
+    required: true
+  fs-read:
+    description: "Comma-separated paths to allow read access (default: working directory)"
+    required: false
+    default: ""
+  fs-write:
+    description: "Comma-separated paths to allow write access"
+    required: false
+    default: ""
+  network:
+    description: "Network policy: 'blocked', or comma-separated domain allowlist (e.g. 'registry.npmjs.org,api.github.com')"
+    required: false
+    default: "blocked"
+  credentials:
+    description: |
+      Newline-separated credential mappings. Each line: SECRET_NAME:host:inject_mode
+      Example:
+        DEPLOY_TOKEN:api.fly.io:header
+        NPM_TOKEN:registry.npmjs.org:header
+    required: false
+    default: ""
+  nono-version:
+    description: "nono version to install (default: latest)"
+    required: false
+    default: "latest"
+  profile:
+    description: "Path to a nono profile JSON (overrides fs-read/fs-write/network inputs)"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install nono
+      shell: bash
+      run: ${{ github.action_path }}/setup.sh
+      env:
+        NONO_VERSION: ${{ inputs.nono-version }}
+
+    - name: Run in sandbox
+      shell: bash
+      run: ${{ github.action_path }}/run.sh
+      env:
+        NONO_ACTION_COMMAND: ${{ inputs.run }}
+        NONO_ACTION_FS_READ: ${{ inputs.fs-read }}
+        NONO_ACTION_FS_WRITE: ${{ inputs.fs-write }}
+        NONO_ACTION_NETWORK: ${{ inputs.network }}
+        NONO_ACTION_CREDENTIALS: ${{ inputs.credentials }}
+        NONO_ACTION_PROFILE: ${{ inputs.profile }}

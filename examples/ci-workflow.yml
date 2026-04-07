@@ -1,0 +1,91 @@
+name: CI with nono sandbox
+
+on:
+  pull_request:
+    branches: [main]
+  # Safe for fork PRs — secrets are stripped from env and injected via proxy
+  pull_request_target:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------
+      # Install dependencies — network limited to package registry only
+      # ----------------------------------------------------------------
+      - name: Install dependencies
+        uses: nono-sandbox/action@v1
+        with:
+          run: npm ci
+          fs-read: "."
+          fs-write: "./node_modules"
+          network: "registry.npmjs.org"
+
+      # ----------------------------------------------------------------
+      # Run tests — no network at all, write only to coverage dir
+      # ----------------------------------------------------------------
+      - name: Run tests
+        uses: nono-sandbox/action@v1
+        with:
+          run: npm test
+          fs-read: "./src, ./tests, ./node_modules"
+          fs-write: "./coverage"
+          network: blocked
+
+      # ----------------------------------------------------------------
+      # Build — no network, write only to dist
+      # ----------------------------------------------------------------
+      - name: Build
+        uses: nono-sandbox/action@v1
+        with:
+          run: npm run build
+          fs-read: "./src, ./node_modules"
+          fs-write: "./dist"
+          network: blocked
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------
+      # Deploy — credential injected via proxy, never in env
+      # The DEPLOY_TOKEN secret is:
+      #   1. Read from GitHub secrets by the action wrapper
+      #   2. Written to a tmpfile outside the sandbox
+      #   3. Stripped from the child's environment
+      #   4. Injected by nono's proxy into HTTPS requests to api.fly.io only
+      # ----------------------------------------------------------------
+      - name: Deploy to Fly.io
+        uses: nono-sandbox/action@v1
+        with:
+          run: ./scripts/deploy.sh
+          fs-read: "./dist, ./fly.toml"
+          fs-write: ""
+          network: "api.fly.io"
+          credentials: |
+            DEPLOY_TOKEN:api.fly.io:header
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+
+  # ----------------------------------------------------------------
+  # Example: third-party action alternative
+  # Wrap an untrusted script with maximum restrictions
+  # ----------------------------------------------------------------
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run third-party audit tool
+        uses: nono-sandbox/action@v1
+        with:
+          run: npx some-audit-tool --report
+          fs-read: "./src, ./package.json, ./node_modules"
+          fs-write: "./audit-report"
+          network: blocked

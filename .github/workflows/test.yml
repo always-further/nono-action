@@ -1,0 +1,278 @@
+name: nono-action PoC tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Use a test secret: set TEST_SECRET in repo settings to any value (e.g. "s3cr3t-value-12345")
+
+jobs:
+  # ---------------------------------------------------------------
+  # Test 1: Network blocking — outbound HTTP should fail
+  # ---------------------------------------------------------------
+  test-network-blocked:
+    name: "Test: network blocked"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify outbound network is blocked
+        uses: ./
+        with:
+          run: |
+            # This MUST fail — network is blocked at the kernel level
+            if curl -sf --max-time 5 https://httpbin.org/get 2>/dev/null; then
+              echo "FAIL: curl to external host succeeded — network not blocked"
+              exit 1
+            fi
+            echo "PASS: outbound network correctly blocked"
+          fs-read: "."
+          network: blocked
+
+  # ---------------------------------------------------------------
+  # Test 2: Network allowlist — only declared host reachable
+  # ---------------------------------------------------------------
+  test-network-allowlist:
+    name: "Test: network allowlist"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify allowlisted host reachable, others blocked
+        uses: ./
+        with:
+          run: |
+            # httpbin.org IS allowed — this should succeed
+            if ! curl -sf --max-time 10 https://httpbin.org/get > /dev/null; then
+              echo "FAIL: curl to allowed host failed"
+              exit 1
+            fi
+            echo "PASS: allowed host reachable"
+
+            # example.com is NOT allowed — this should fail
+            if curl -sf --max-time 5 https://example.com 2>/dev/null; then
+              echo "FAIL: curl to non-allowed host succeeded"
+              exit 1
+            fi
+            echo "PASS: non-allowed host correctly blocked"
+          fs-read: "."
+          network: "httpbin.org"
+
+  # ---------------------------------------------------------------
+  # Test 3: Filesystem write restriction — writes outside allowed paths fail
+  # ---------------------------------------------------------------
+  test-fs-write-blocked:
+    name: "Test: filesystem write blocked"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: mkdir -p ./allowed-dir ./forbidden-dir
+
+      - name: Verify writes blocked outside allowed paths
+        uses: ./
+        with:
+          run: |
+            # Write to allowed dir — should work
+            echo "hello" > ./allowed-dir/test.txt
+            if [[ ! -f ./allowed-dir/test.txt ]]; then
+              echo "FAIL: write to allowed dir failed"
+              exit 1
+            fi
+            echo "PASS: write to allowed dir succeeded"
+
+            # Write to forbidden dir — should fail with EACCES
+            if echo "evil" > ./forbidden-dir/evil.txt 2>/dev/null; then
+              echo "FAIL: write to forbidden dir succeeded — sandbox not enforced"
+              exit 1
+            fi
+            echo "PASS: write to forbidden dir correctly blocked"
+
+            # Write to /etc — should definitely fail
+            if echo "evil" > /etc/evil.txt 2>/dev/null; then
+              echo "FAIL: write to /etc succeeded"
+              exit 1
+            fi
+            echo "PASS: write to /etc correctly blocked"
+          fs-read: "."
+          fs-write: "./allowed-dir"
+          network: blocked
+
+  # ---------------------------------------------------------------
+  # Test 4: Filesystem read restriction — reads outside allowed paths fail
+  # ---------------------------------------------------------------
+  test-fs-read-blocked:
+    name: "Test: filesystem read blocked"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify reads blocked outside allowed paths
+        uses: ./
+        with:
+          run: |
+            # Read workspace file — should work
+            if ! cat ./README.md > /dev/null 2>&1; then
+              echo "FAIL: read of workspace file failed"
+              exit 1
+            fi
+            echo "PASS: workspace read succeeded"
+
+            # Read ~/.ssh — should fail
+            if cat ~/.ssh/id_rsa 2>/dev/null; then
+              echo "FAIL: read of ~/.ssh succeeded — credential leak!"
+              exit 1
+            fi
+            echo "PASS: ~/.ssh read correctly blocked"
+
+            # Read ~/.aws — should fail
+            if cat ~/.aws/credentials 2>/dev/null; then
+              echo "FAIL: read of ~/.aws succeeded — credential leak!"
+              exit 1
+            fi
+            echo "PASS: ~/.aws read correctly blocked"
+          fs-read: "."
+          network: blocked
+
+  # ---------------------------------------------------------------
+  # Test 5: Secret stripping — env var removed from child
+  # ---------------------------------------------------------------
+  test-secret-stripped:
+    name: "Test: secret stripped from env"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify secret not visible to child process
+        uses: ./
+        with:
+          run: |
+            # The TEST_SECRET env var should NOT be visible
+            if [[ -n "${TEST_SECRET:-}" ]]; then
+              echo "FAIL: TEST_SECRET is visible in child env"
+              echo "Value: ${TEST_SECRET}"
+              exit 1
+            fi
+            echo "PASS: TEST_SECRET not in child environment"
+
+            # Also check /proc/self/environ
+            if grep -q "TEST_SECRET" /proc/self/environ 2>/dev/null; then
+              echo "FAIL: TEST_SECRET found in /proc/self/environ"
+              exit 1
+            fi
+            echo "PASS: TEST_SECRET not in /proc/self/environ"
+          fs-read: "."
+          network: "httpbin.org"
+          credentials: |
+            TEST_SECRET:httpbin.org:header
+        env:
+          TEST_SECRET: "s3cr3t-canary-value-do-not-leak"
+
+  # ---------------------------------------------------------------
+  # Test 6: Credential proxy injection — secret injected into HTTP header
+  # ---------------------------------------------------------------
+  test-credential-injection:
+    name: "Test: credential proxy injection"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify credential injected via proxy
+        uses: ./
+        with:
+          run: |
+            # TEST_SECRET should NOT be in env
+            if [[ -n "${TEST_SECRET:-}" ]]; then
+              echo "FAIL: secret visible in env"
+              exit 1
+            fi
+
+            # But the proxy should inject it into requests to httpbin.org
+            # httpbin.org/headers echoes back all request headers
+            RESPONSE=$(curl -sf --max-time 10 https://httpbin.org/headers)
+            echo "Response: ${RESPONSE}"
+
+            # Check that Authorization header contains our token
+            if echo "${RESPONSE}" | grep -q "s3cr3t-canary-value-do-not-leak"; then
+              echo "PASS: credential injected into request by proxy"
+            else
+              echo "FAIL: credential not found in proxied request headers"
+              echo "This may be expected if proxy credential injection is not yet wired"
+              exit 1
+            fi
+          fs-read: "."
+          network: "httpbin.org"
+          credentials: |
+            TEST_SECRET:httpbin.org:header
+        env:
+          TEST_SECRET: "s3cr3t-canary-value-do-not-leak"
+
+  # ---------------------------------------------------------------
+  # Test 7: Combined — realistic build step
+  # ---------------------------------------------------------------
+  test-realistic-build:
+    name: "Test: realistic build scenario"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Simulate a sandboxed build
+        uses: ./
+        with:
+          run: |
+            echo "Building project..."
+            # Can read source
+            ls ./README.md > /dev/null
+            # Can write to build output
+            mkdir -p ./build
+            echo "artifact" > ./build/output.txt
+            # Cannot write outside build dir
+            if echo "x" > ./README.md 2>/dev/null; then
+              echo "FAIL: wrote to source file"
+              exit 1
+            fi
+            # Cannot reach network
+            if curl -sf --max-time 3 https://example.com 2>/dev/null; then
+              echo "FAIL: network not blocked"
+              exit 1
+            fi
+            echo "PASS: build sandbox working correctly"
+          fs-read: "."
+          fs-write: "./build"
+          network: blocked
+
+  # ---------------------------------------------------------------
+  # Test 8: Profile mode — use a nono profile JSON directly
+  # ---------------------------------------------------------------
+  test-profile-mode:
+    name: "Test: profile mode"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create test profile
+        run: |
+          cat > /tmp/test-profile.json << 'EOF'
+          {
+            "meta": { "name": "test", "version": "1.0.0" },
+            "workdir": { "access": "read" },
+            "filesystem": {
+              "write": ["/tmp/test-output"]
+            }
+          }
+          EOF
+          mkdir -p /tmp/test-output
+
+      - name: Run with profile
+        uses: ./
+        with:
+          run: |
+            echo "test" > /tmp/test-output/result.txt
+            if [[ -f /tmp/test-output/result.txt ]]; then
+              echo "PASS: profile mode working"
+            else
+              echo "FAIL: could not write to allowed path"
+              exit 1
+            fi
+          profile: /tmp/test-profile.json
