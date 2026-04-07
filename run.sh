@@ -133,6 +133,12 @@ if [[ -n "${CREDENTIALS}" ]]; then
             continue
         fi
 
+        # Compute SHA-256 digest of the secret BEFORE stripping it.
+        # The digest is passed to the child as NONO_CRED_{N}_SHA256 so it can
+        # verify the proxy delivered the correct secret without ever seeing it.
+        secret_digest=$(printf '%s' "${secret_value}" | sha256sum | cut -d' ' -f1)
+        export "NONO_CRED_${CRED_INDEX}_SHA256=${secret_digest}"
+
         # Write secret to a tmpfile (outside child's sandbox)
         cred_file="${CRED_DIR}/${cred_name}"
         printf '%s' "${secret_value}" > "${cred_file}"

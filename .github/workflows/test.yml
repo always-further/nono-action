@@ -209,37 +209,46 @@ jobs:
             echo "Echo response:"
             echo "${RESPONSE}"
 
-            # Prove the real secret was injected, not the phantom token.
+            # ── Part 4: cryptographic proof the real secret was injected ──
             #
-            # GitHub Actions masks repo secret values anywhere in logs.
-            # The phantom token is a random 64-char hex string — NOT a repo secret.
-            # So if the Authorization value shows as *** → it's the real secret.
-            # If it shows as a raw hex string → it's the phantom token (FAIL).
+            # run.sh pre-computed SHA-256 of MY_SECRET before stripping it,
+            # and passed it as NONO_CRED_0_SHA256. The child never sees the
+            # secret itself, but can hash what the echo service returned
+            # and compare digests.
             AUTH_VALUE=$(echo "${RESPONSE}" | grep -o '"Authorization": "[^"]*"' | sed 's/"Authorization": "Bearer //' | sed 's/"//' || true)
-            echo "Authorization value in echo: '${AUTH_VALUE}'"
-            echo "Phantom token (first 8 chars): '${NONO_CRED_0:0:8}...'"
 
             if [[ -z "${AUTH_VALUE}" ]]; then
-              echo "FAIL: no Authorization header in echoed response"
+              echo "FAIL: no Authorization header in echo response"
               exit 1
             fi
 
-            if [[ "${AUTH_VALUE}" == "${NONO_CRED_0}" ]]; then
-              echo "FAIL: upstream received phantom token — proxy did not swap"
+            # Hash what the upstream actually received
+            RECEIVED_DIGEST=$(printf '%s' "${AUTH_VALUE}" | sha256sum | cut -d' ' -f1)
+            EXPECTED_DIGEST="${NONO_CRED_0_SHA256}"
+            PHANTOM_DIGEST=$(printf '%s' "${NONO_CRED_0}" | sha256sum | cut -d' ' -f1)
+
+            echo "Expected digest (pre-computed from MY_SECRET): ${EXPECTED_DIGEST}"
+            echo "Received digest (from echo response):          ${RECEIVED_DIGEST}"
+            echo "Phantom token digest (must NOT match):          ${PHANTOM_DIGEST}"
+
+            if [[ "${RECEIVED_DIGEST}" == "${PHANTOM_DIGEST}" ]]; then
+              echo "FAIL: upstream received the phantom token, not the real secret"
               exit 1
             fi
 
-            if echo "${AUTH_VALUE}" | grep -qE '^[0-9a-f]{64}$'; then
-              echo "FAIL: looks like phantom token (64-char hex)"
+            if [[ "${RECEIVED_DIGEST}" == "${EXPECTED_DIGEST}" ]]; then
+              echo "PASS: SHA-256 match — upstream received the exact MY_SECRET value"
+            else
+              echo "FAIL: digest mismatch — upstream received something unexpected"
               exit 1
             fi
 
-            echo "PASS: real secret delivered to upstream"
             echo ""
-            echo "  Proof: the echo service returned Authorization: ***"
-            echo "  GitHub only masks values matching repo secrets."
-            echo "  The phantom token (${NONO_CRED_0:0:8}...) would appear unmasked."
-            echo "  Therefore *** = the real MY_SECRET was injected by the proxy."
+            echo "Summary:"
+            echo "  Child process: MY_SECRET not in env, not in /proc, not readable"
+            echo "  Proxy:         held secret in memory, injected into Authorization header"
+            echo "  Upstream:      received real MY_SECRET (SHA-256 verified)"
+            echo "  Attacker:      has no secret to steal, no unauthorized host to send it to"
           fs-read: "."
           network: "echo-http-requests.appspot.com"
           credentials: |
@@ -493,37 +502,25 @@ jobs:
               echo "Echo service response:"
               echo "${ECHO_RESPONSE}"
 
-              # Prove the upstream received the REAL secret, not the phantom token.
-              #
-              # We can't grep for the secret value — GitHub masks it as *** in logs.
-              # But that masking IS the proof:
-              #
-              #   - GitHub Actions only masks values it recognizes as repo secrets
-              #   - The phantom token is a random 64-char hex string — NOT a repo secret
-              #   - If the Authorization header shows *** → GitHub masked it → it's the real secret
-              #   - If it showed a raw 64-char hex string → it's the phantom token (FAIL)
-              #
+              # Cryptographic proof: hash what the echo service returned,
+              # compare to pre-computed digest of MY_SECRET.
               AUTH_VALUE=$(echo "${ECHO_RESPONSE}" | grep -o '"Authorization": "[^"]*"' | sed 's/"Authorization": "Bearer //' | sed 's/"//' || true)
-              echo "Authorization value seen in echo: '${AUTH_VALUE}'"
-              echo "Phantom token (first 8 chars): '${NONO_CRED_0:0:8}...'"
 
               if [[ -z "${AUTH_VALUE}" ]]; then
                 echo "FAIL: no Authorization header in echo response"
                 FAIL=1
-              elif [[ "${AUTH_VALUE}" == "${NONO_CRED_0}" ]]; then
-                echo "FAIL: upstream received phantom token — proxy did not swap"
-                FAIL=1
-              elif echo "${AUTH_VALUE}" | grep -qE '^[0-9a-f]{64}$'; then
-                echo "FAIL: upstream received a 64-char hex string (looks like phantom token)"
-                FAIL=1
               else
-                echo "PASS: upstream received real secret (GitHub masked it as ***)"
-                echo ""
-                echo "  How we know:"
-                echo "  - The echo service returned Authorization: ***"
-                echo "  - GitHub only masks values matching repo secrets"
-                echo "  - The phantom token (${NONO_CRED_0:0:8}...) would appear unmasked"
-                echo "  - Therefore *** = the real MY_SECRET was delivered"
+                RECEIVED_DIGEST=$(printf '%s' "${AUTH_VALUE}" | sha256sum | cut -d' ' -f1)
+                EXPECTED_DIGEST="${NONO_CRED_0_SHA256}"
+                echo "Expected digest: ${EXPECTED_DIGEST}"
+                echo "Received digest: ${RECEIVED_DIGEST}"
+
+                if [[ "${RECEIVED_DIGEST}" == "${EXPECTED_DIGEST}" ]]; then
+                  echo "PASS: SHA-256 match — real secret delivered to upstream via proxy"
+                else
+                  echo "FAIL: digest mismatch — proxy did not deliver the correct secret"
+                  FAIL=1
+                fi
               fi
             else
               echo "INFO: proxy env vars not set, skipping proxy proof"
