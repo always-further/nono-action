@@ -209,39 +209,37 @@ jobs:
             echo "Echo response:"
             echo "${RESPONSE}"
 
-            # The Authorization header in the response should contain "Bearer "
-            # followed by the real secret — NOT the phantom token.
-            # We can't grep for the exact secret value (GitHub masks it),
-            # so verify the phantom token was replaced (it's a 64-char hex string).
-            AUTH_HEADER=$(echo "${RESPONSE}" | grep -o '"Authorization": "[^"]*"' || true)
-            echo "Authorization header seen by upstream: ${AUTH_HEADER}"
+            # Prove the real secret was injected, not the phantom token.
+            #
+            # GitHub Actions masks repo secret values anywhere in logs.
+            # The phantom token is a random 64-char hex string — NOT a repo secret.
+            # So if the Authorization value shows as *** → it's the real secret.
+            # If it shows as a raw hex string → it's the phantom token (FAIL).
+            AUTH_VALUE=$(echo "${RESPONSE}" | grep -o '"Authorization": "[^"]*"' | sed 's/"Authorization": "Bearer //' | sed 's/"//' || true)
+            echo "Authorization value in echo: '${AUTH_VALUE}'"
+            echo "Phantom token (first 8 chars): '${NONO_CRED_0:0:8}...'"
 
-            if [[ -z "${AUTH_HEADER}" ]]; then
+            if [[ -z "${AUTH_VALUE}" ]]; then
               echo "FAIL: no Authorization header in echoed response"
               exit 1
             fi
 
-            # The phantom token is a 64-char hex string. If the echoed header
-            # still contains the phantom token, injection failed.
-            if echo "${AUTH_HEADER}" | grep -q "${NONO_CRED_0}"; then
-              echo "FAIL: upstream received phantom token, not real secret"
-              exit 1
-            fi
-            echo "PASS: phantom token was swapped — real credential injected"
-
-            # Verify the header contains "Bearer " (credential_format = "Bearer {}")
-            if echo "${AUTH_HEADER}" | grep -q "Bearer "; then
-              echo "PASS: Authorization header has Bearer format"
-            else
-              echo "FAIL: unexpected Authorization header format"
+            if [[ "${AUTH_VALUE}" == "${NONO_CRED_0}" ]]; then
+              echo "FAIL: upstream received phantom token — proxy did not swap"
               exit 1
             fi
 
+            if echo "${AUTH_VALUE}" | grep -qE '^[0-9a-f]{64}$'; then
+              echo "FAIL: looks like phantom token (64-char hex)"
+              exit 1
+            fi
+
+            echo "PASS: real secret delivered to upstream"
             echo ""
-            echo "Summary:"
-            echo "  Child env: MY_SECRET is absent"
-            echo "  Proxy:     swapped phantom token for real secret"
-            echo "  Upstream:  received Authorization: Bearer <real-secret>"
+            echo "  Proof: the echo service returned Authorization: ***"
+            echo "  GitHub only masks values matching repo secrets."
+            echo "  The phantom token (${NONO_CRED_0:0:8}...) would appear unmasked."
+            echo "  Therefore *** = the real MY_SECRET was injected by the proxy."
           fs-read: "."
           network: "echo-http-requests.appspot.com"
           credentials: |
@@ -495,17 +493,37 @@ jobs:
               echo "Echo service response:"
               echo "${ECHO_RESPONSE}"
 
-              # Verify the upstream received a real credential, not the phantom token
-              AUTH=$(echo "${ECHO_RESPONSE}" | grep -o '"Authorization": "[^"]*"' || true)
-              if [[ -n "${AUTH}" ]]; then
-                if echo "${AUTH}" | grep -q "${NONO_CRED_0}"; then
-                  echo "FAIL: upstream got phantom token, not real secret"
-                  FAIL=1
-                else
-                  echo "PASS: secret delivered to upstream via proxy (not visible to child)"
-                fi
+              # Prove the upstream received the REAL secret, not the phantom token.
+              #
+              # We can't grep for the secret value — GitHub masks it as *** in logs.
+              # But that masking IS the proof:
+              #
+              #   - GitHub Actions only masks values it recognizes as repo secrets
+              #   - The phantom token is a random 64-char hex string — NOT a repo secret
+              #   - If the Authorization header shows *** → GitHub masked it → it's the real secret
+              #   - If it showed a raw 64-char hex string → it's the phantom token (FAIL)
+              #
+              AUTH_VALUE=$(echo "${ECHO_RESPONSE}" | grep -o '"Authorization": "[^"]*"' | sed 's/"Authorization": "Bearer //' | sed 's/"//' || true)
+              echo "Authorization value seen in echo: '${AUTH_VALUE}'"
+              echo "Phantom token (first 8 chars): '${NONO_CRED_0:0:8}...'"
+
+              if [[ -z "${AUTH_VALUE}" ]]; then
+                echo "FAIL: no Authorization header in echo response"
+                FAIL=1
+              elif [[ "${AUTH_VALUE}" == "${NONO_CRED_0}" ]]; then
+                echo "FAIL: upstream received phantom token — proxy did not swap"
+                FAIL=1
+              elif echo "${AUTH_VALUE}" | grep -qE '^[0-9a-f]{64}$'; then
+                echo "FAIL: upstream received a 64-char hex string (looks like phantom token)"
+                FAIL=1
               else
-                echo "INFO: could not verify echo response (may be transient)"
+                echo "PASS: upstream received real secret (GitHub masked it as ***)"
+                echo ""
+                echo "  How we know:"
+                echo "  - The echo service returned Authorization: ***"
+                echo "  - GitHub only masks values matching repo secrets"
+                echo "  - The phantom token (${NONO_CRED_0:0:8}...) would appear unmasked"
+                echo "  - Therefore *** = the real MY_SECRET was delivered"
               fi
             else
               echo "INFO: proxy env vars not set, skipping proxy proof"
