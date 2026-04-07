@@ -188,17 +188,36 @@ jobs:
               exit 1
             fi
 
-            # But the proxy should inject it into requests to httpbin.org
-            # httpbin.org/headers echoes back all request headers
-            RESPONSE=$(curl -sf --max-time 10 https://httpbin.org/headers)
+            # nono sets CRED_0_BASE_URL for reverse proxy path
+            echo "CRED_0_BASE_URL=${CRED_0_BASE_URL:-<not set>}"
+            echo "Available proxy env vars:"
+            env | grep -iE '(proxy|cred_|base_url)' | sed 's/=.*$/=***/' || true
+
+            if [[ -z "${CRED_0_BASE_URL:-}" ]]; then
+              echo "FAIL: CRED_0_BASE_URL not set — proxy env not injected"
+              exit 1
+            fi
+
+            # nono proxy is a reverse proxy: child hits localhost, proxy forwards to upstream.
+            # The proxy requires a phantom token (session token) for authentication.
+            # CRED_0_BASE_URL = http://127.0.0.1:{port}/cred_0
+            # NONO_CRED_0 = session token (phantom token)
+            echo "NONO_CRED_0 is set: $(test -n "${NONO_CRED_0:-}" && echo yes || echo no)"
+
+            # Send request via reverse proxy with phantom token
+            # The proxy validates the token, strips it, injects the real credential,
+            # and forwards to https://httpbin.org/headers
+            RESPONSE=$(curl -sf --noproxy '*' --max-time 10 \
+              -H "Authorization: Bearer ${NONO_CRED_0}" \
+              "${CRED_0_BASE_URL}/headers")
             echo "Response: ${RESPONSE}"
 
-            # Check that Authorization header contains our token
+            # httpbin.org/headers echoes back all request headers
+            # The proxy should have replaced our phantom token with the real secret
             if echo "${RESPONSE}" | grep -q "s3cr3t-canary-value-do-not-leak"; then
               echo "PASS: credential injected into request by proxy"
             else
               echo "FAIL: credential not found in proxied request headers"
-              echo "This may be expected if proxy credential injection is not yet wired"
               exit 1
             fi
           fs-read: "."
