@@ -202,6 +202,15 @@ echo "  credentials:      $(echo "${CREDENTIALS}" | grep -c ':' || echo 0) confi
 echo "  nono args:        ${NONO_ARGS[*]:-<none>}"
 echo "::endgroup::"
 
+# Strip action metadata env vars — they contain credential mappings,
+# the command string, and other internals the child should not see.
+unset NONO_ACTION_COMMAND
+unset NONO_ACTION_FS_READ
+unset NONO_ACTION_FS_WRITE
+unset NONO_ACTION_NETWORK
+unset NONO_ACTION_CREDENTIALS
+unset NONO_ACTION_PROFILE
+
 exec nono run \
     --allow-cwd \
     --no-rollback \
