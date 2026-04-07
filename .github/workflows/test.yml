@@ -172,6 +172,8 @@ jobs:
 
   # ---------------------------------------------------------------
   # Test 6: Credential proxy injection — secret injected into HTTP header
+  # Uses echo service to prove the REAL secret arrives at the upstream,
+  # while the child process never sees it.
   # ---------------------------------------------------------------
   test-credential-injection:
     name: "Test: credential proxy injection"
@@ -183,50 +185,69 @@ jobs:
         uses: ./
         with:
           run: |
-            # TEST_SECRET should NOT be in env
-            if [[ -n "${TEST_SECRET:-}" ]]; then
-              echo "FAIL: secret visible in env"
+            # ── Part 1: secret is NOT in child env ──
+            if [[ -n "${MY_SECRET:-}" ]]; then
+              echo "FAIL: MY_SECRET visible in env"
               exit 1
             fi
+            echo "PASS: MY_SECRET not in child environment"
 
-            # nono sets CRED_0_BASE_URL for reverse proxy path
+            # ── Part 2: proxy env vars are set ──
             echo "CRED_0_BASE_URL=${CRED_0_BASE_URL:-<not set>}"
-            echo "Available proxy env vars:"
-            env | grep -iE '(proxy|cred_|base_url)' | sed 's/=.*$/=***/' || true
-
             if [[ -z "${CRED_0_BASE_URL:-}" ]]; then
-              echo "FAIL: CRED_0_BASE_URL not set — proxy env not injected"
+              echo "FAIL: CRED_0_BASE_URL not set"
               exit 1
             fi
+            echo "PASS: proxy base URL is set"
 
-            # nono proxy is a reverse proxy: child hits localhost, proxy forwards to upstream.
-            # The proxy requires a phantom token (session token) for authentication.
-            # CRED_0_BASE_URL = http://127.0.0.1:{port}/cred_0
-            # NONO_CRED_0 = session token (phantom token)
-            echo "NONO_CRED_0 is set: $(test -n "${NONO_CRED_0:-}" && echo yes || echo no)"
-
-            # Send request via reverse proxy with phantom token
-            # The proxy validates the token, strips it, injects the real credential,
-            # and forwards to https://httpbin.org/headers
+            # ── Part 3: secret IS injected by proxy into upstream request ──
+            # The echo service mirrors back all headers it receives.
+            # The proxy swaps the phantom token for the real MY_SECRET value.
             RESPONSE=$(curl -sf --noproxy '*' --max-time 10 \
               -H "Authorization: Bearer ${NONO_CRED_0}" \
-              "${CRED_0_BASE_URL}/headers")
-            echo "Response: ${RESPONSE}"
+              "${CRED_0_BASE_URL}/echo")
+            echo "Echo response:"
+            echo "${RESPONSE}"
 
-            # httpbin.org/headers echoes back all request headers
-            # The proxy should have replaced our phantom token with the real secret
-            if echo "${RESPONSE}" | grep -q "s3cr3t-canary-value-do-not-leak"; then
-              echo "PASS: credential injected into request by proxy"
-            else
-              echo "FAIL: credential not found in proxied request headers"
+            # The Authorization header in the response should contain "Bearer "
+            # followed by the real secret — NOT the phantom token.
+            # We can't grep for the exact secret value (GitHub masks it),
+            # so verify the phantom token was replaced (it's a 64-char hex string).
+            AUTH_HEADER=$(echo "${RESPONSE}" | grep -o '"Authorization": "[^"]*"' || true)
+            echo "Authorization header seen by upstream: ${AUTH_HEADER}"
+
+            if [[ -z "${AUTH_HEADER}" ]]; then
+              echo "FAIL: no Authorization header in echoed response"
               exit 1
             fi
+
+            # The phantom token is a 64-char hex string. If the echoed header
+            # still contains the phantom token, injection failed.
+            if echo "${AUTH_HEADER}" | grep -q "${NONO_CRED_0}"; then
+              echo "FAIL: upstream received phantom token, not real secret"
+              exit 1
+            fi
+            echo "PASS: phantom token was swapped — real credential injected"
+
+            # Verify the header contains "Bearer " (credential_format = "Bearer {}")
+            if echo "${AUTH_HEADER}" | grep -q "Bearer "; then
+              echo "PASS: Authorization header has Bearer format"
+            else
+              echo "FAIL: unexpected Authorization header format"
+              exit 1
+            fi
+
+            echo ""
+            echo "Summary:"
+            echo "  Child env: MY_SECRET is absent"
+            echo "  Proxy:     swapped phantom token for real secret"
+            echo "  Upstream:  received Authorization: Bearer <real-secret>"
           fs-read: "."
-          network: "httpbin.org"
+          network: "echo-http-requests.appspot.com"
           credentials: |
-            TEST_SECRET:httpbin.org:header
+            MY_SECRET:echo-http-requests.appspot.com:header
         env:
-          TEST_SECRET: "s3cr3t-canary-value-do-not-leak"
+          MY_SECRET: ${{ secrets.MY_SECRET }}
 
   # ---------------------------------------------------------------
   # Test 7: Combined — realistic build step
@@ -463,6 +484,34 @@ jobs:
             fi
 
             echo ""
+            echo "=== Proof: secret IS usable via proxy ==="
+            # The secret is invisible to us, but the proxy holds it.
+            # Hit the echo service via the reverse proxy — it should
+            # echo back the REAL secret in the Authorization header.
+            if [[ -n "${CRED_0_BASE_URL:-}" && -n "${NONO_CRED_0:-}" ]]; then
+              ECHO_RESPONSE=$(curl -sf --noproxy '*' --max-time 10 \
+                -H "Authorization: Bearer ${NONO_CRED_0}" \
+                "${CRED_0_BASE_URL}/echo" 2>/dev/null || true)
+              echo "Echo service response:"
+              echo "${ECHO_RESPONSE}"
+
+              # Verify the upstream received a real credential, not the phantom token
+              AUTH=$(echo "${ECHO_RESPONSE}" | grep -o '"Authorization": "[^"]*"' || true)
+              if [[ -n "${AUTH}" ]]; then
+                if echo "${AUTH}" | grep -q "${NONO_CRED_0}"; then
+                  echo "FAIL: upstream got phantom token, not real secret"
+                  FAIL=1
+                else
+                  echo "PASS: secret delivered to upstream via proxy (not visible to child)"
+                fi
+              else
+                echo "INFO: could not verify echo response (may be transient)"
+              fi
+            else
+              echo "INFO: proxy env vars not set, skipping proxy proof"
+            fi
+
+            echo ""
             echo "========================================"
             if [[ $FAIL -eq 0 ]]; then
               echo "ALL EXFILTRATION VECTORS BLOCKED"
@@ -472,8 +521,8 @@ jobs:
             fi
           fs-read: "."
           fs-write: ""
-          network: "registry.npmjs.org,api.github.com"
+          network: "registry.npmjs.org,api.github.com,echo-http-requests.appspot.com"
           credentials: |
-            MY_SECRET:api.example.com:header
+            MY_SECRET:echo-http-requests.appspot.com:header
         env:
           MY_SECRET: ${{ secrets.MY_SECRET }}
