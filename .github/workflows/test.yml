@@ -255,6 +255,7 @@ jobs:
         run: |
           cat > /tmp/test-profile.json << 'EOF'
           {
+            "extends": "default",
             "meta": { "name": "test", "version": "1.0.0" },
             "workdir": { "access": "read" },
             "filesystem": {

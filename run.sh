@@ -174,6 +174,7 @@ ENDJSON
         GENERATED_PROFILE="${CRED_DIR}/profile.json"
         cat > "${GENERATED_PROFILE}" <<ENDJSON
 {
+  "extends": "default",
   "meta": {
     "name": "nono-action-generated",
     "version": "1.0.0"

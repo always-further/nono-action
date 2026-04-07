@@ -17,13 +17,18 @@ fi
 
 mkdir -p "${INSTALL_DIR}"
 
-# Determine download URL
 REPO="always-further/nono"
+
+# Resolve "latest" to an actual version tag
 if [[ "${NONO_VERSION}" == "latest" ]]; then
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/nono-x86_64-unknown-linux-gnu.tar.gz"
-else
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${NONO_VERSION}/nono-x86_64-unknown-linux-gnu.tar.gz"
+    # Follow the redirect to get the actual tag name
+    NONO_VERSION=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+')
+    echo "Resolved latest version: v${NONO_VERSION}"
 fi
+
+# Asset name includes the version: nono-v{VERSION}-{target}.tar.gz
+ASSET="nono-v${NONO_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${NONO_VERSION}/${ASSET}"
 
 echo "Downloading nono from ${DOWNLOAD_URL}"
 curl -fsSL "${DOWNLOAD_URL}" -o "${INSTALL_DIR}/nono.tar.gz"
