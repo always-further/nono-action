@@ -31,13 +31,6 @@ cleanup() {
 trap cleanup EXIT
 
 # --------------------------------------------------------------------------
-# If a profile is provided, use it directly (power-user mode)
-# --------------------------------------------------------------------------
-if [[ -n "${PROFILE}" ]]; then
-    exec nono run --profile "${PROFILE}" --no-rollback --no-diagnostics -- bash -c "${COMMAND}"
-fi
-
-# --------------------------------------------------------------------------
 # Build nono CLI flags from action inputs
 # --------------------------------------------------------------------------
 NONO_ARGS=()
@@ -133,12 +126,6 @@ if [[ -n "${CREDENTIALS}" ]]; then
             continue
         fi
 
-        # Compute SHA-256 digest of the secret BEFORE stripping it.
-        # The digest is passed to the child as NONO_CRED_{N}_SHA256 so it can
-        # verify the proxy delivered the correct secret without ever seeing it.
-        secret_digest=$(printf '%s' "${secret_value}" | sha256sum | cut -d' ' -f1)
-        export "NONO_CRED_${CRED_INDEX}_SHA256=${secret_digest}"
-
         # Write secret to a tmpfile (outside child's sandbox)
         cred_file="${CRED_DIR}/${cred_name}"
         printf '%s' "${secret_value}" > "${cred_file}"
@@ -193,8 +180,15 @@ ${CRED_CONFIGS}
   }
 }
 ENDJSON
-        NONO_ARGS+=(--profile "${GENERATED_PROFILE}")
     fi
+fi
+
+# If a profile is provided, prefer it over generated fs/network flags. We still
+# process declared credentials above so they are removed from the child env.
+if [[ -n "${PROFILE}" ]]; then
+    NONO_ARGS+=(--profile "${PROFILE}")
+elif [[ -n "${GENERATED_PROFILE}" ]]; then
+    NONO_ARGS+=(--profile "${GENERATED_PROFILE}")
 fi
 
 # --------------------------------------------------------------------------
