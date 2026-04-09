@@ -6,8 +6,9 @@ branding:
 
 inputs:
   run:
-    description: "Command to execute inside the sandbox"
-    required: true
+    description: "Command to execute inside the sandbox (optional if only using checkout)"
+    required: false
+    default: ""
   fs-read:
     description: "Comma-separated paths to allow read access (default: working directory)"
     required: false
@@ -37,6 +38,32 @@ inputs:
     required: false
     default: ""
 
+  # Sandboxed checkout inputs (replaces actions/checkout)
+  checkout:
+    description: "Enable sandboxed git checkout (replaces actions/checkout). Set to 'true' to enable."
+    required: false
+    default: ""
+  checkout-repository:
+    description: "Repository to checkout in owner/repo format (default: current repository)"
+    required: false
+    default: ""
+  checkout-ref:
+    description: "Git ref to checkout (branch, tag, or SHA). Default: GITHUB_REF for the triggering event."
+    required: false
+    default: ""
+  checkout-fetch-depth:
+    description: "Number of commits to fetch. 0 for full history. (default: 1)"
+    required: false
+    default: "1"
+  checkout-path:
+    description: "Directory to checkout into (default: GITHUB_WORKSPACE)"
+    required: false
+    default: ""
+  checkout-token:
+    description: "Token for git authentication. Injected via nono's credential proxy, never persisted in .git/config. (default: github.token)"
+    required: false
+    default: ""
+
 runs:
   using: "composite"
   steps:
@@ -46,7 +73,19 @@ runs:
       env:
         NONO_VERSION: ${{ inputs.nono-version }}
 
+    - name: Sandboxed checkout
+      if: ${{ inputs.checkout == 'true' }}
+      shell: bash
+      run: ${{ github.action_path }}/checkout.sh
+      env:
+        NONO_ACTION_CHECKOUT_REPOSITORY: ${{ inputs.checkout-repository }}
+        NONO_ACTION_CHECKOUT_REF: ${{ inputs.checkout-ref }}
+        NONO_ACTION_CHECKOUT_FETCH_DEPTH: ${{ inputs.checkout-fetch-depth }}
+        NONO_ACTION_CHECKOUT_PATH: ${{ inputs.checkout-path }}
+        NONO_ACTION_CHECKOUT_TOKEN: ${{ inputs.checkout-token || github.token }}
+
     - name: Run in sandbox
+      if: ${{ inputs.run != '' }}
       shell: bash
       run: ${{ github.action_path }}/run.sh
       env:
