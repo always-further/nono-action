@@ -549,3 +549,124 @@ jobs:
             MY_SECRET:echo-http-requests.appspot.com:header
         env:
           MY_SECRET: ${{ secrets.MY_SECRET }}
+
+  # ---------------------------------------------------------------
+  # Test 10: Sandboxed checkout — basic clone works
+  # ---------------------------------------------------------------
+  test-sandboxed-checkout:
+    name: "Test: sandboxed checkout"
+    runs-on: ubuntu-latest
+    steps:
+      # We need actions/checkout first to get the action code itself.
+      # In production, users reference the action by tag — no bootstrap needed.
+      - uses: actions/checkout@v4
+
+      - name: Sandboxed checkout into separate directory
+        uses: ./
+        with:
+          checkout: true
+          checkout-path: /tmp/test-checkout
+          run: |
+            # Verify the repo was cloned
+            if [[ ! -f /tmp/test-checkout/README.md ]]; then
+              echo "FAIL: README.md not found in checkout path"
+              exit 1
+            fi
+            echo "PASS: repository cloned successfully"
+
+            # Verify action files are present
+            if [[ ! -f /tmp/test-checkout/action.yml ]]; then
+              echo "FAIL: action.yml not found"
+              exit 1
+            fi
+            echo "PASS: action.yml present"
+
+            # Verify checkout.sh is present
+            if [[ ! -f /tmp/test-checkout/checkout.sh ]]; then
+              echo "FAIL: checkout.sh not found"
+              exit 1
+            fi
+            echo "PASS: checkout.sh present"
+
+            echo "PASS: sandboxed checkout working correctly"
+          fs-read: "/tmp/test-checkout"
+          network: blocked
+
+  # ---------------------------------------------------------------
+  # Test 11: Sandboxed checkout — token not persisted in .git/config
+  # ---------------------------------------------------------------
+  test-checkout-no-token-leak:
+    name: "Test: checkout token not persisted"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify token not in .git/config after checkout
+        uses: ./
+        with:
+          checkout: true
+          checkout-path: /tmp/test-token-leak
+          run: |
+            cd /tmp/test-token-leak
+
+            # .git/config must NOT contain any auth tokens
+            if grep -qi "authorization" .git/config 2>/dev/null; then
+              echo "FAIL: Authorization header found in .git/config"
+              cat .git/config
+              exit 1
+            fi
+            echo "PASS: no Authorization in .git/config"
+
+            if grep -qi "x-access-token" .git/config 2>/dev/null; then
+              echo "FAIL: x-access-token found in .git/config"
+              cat .git/config
+              exit 1
+            fi
+            echo "PASS: no x-access-token in .git/config"
+
+            if grep -qi "extraheader" .git/config 2>/dev/null; then
+              echo "FAIL: extraheader found in .git/config"
+              cat .git/config
+              exit 1
+            fi
+            echo "PASS: no extraheader in .git/config"
+
+            # GITHUB_TOKEN must not be in the environment
+            if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+              echo "FAIL: GITHUB_TOKEN visible in child environment"
+              exit 1
+            fi
+            echo "PASS: GITHUB_TOKEN not in child environment"
+
+            echo "PASS: no token leakage detected"
+          fs-read: "/tmp/test-token-leak"
+          network: blocked
+
+  # ---------------------------------------------------------------
+  # Test 12: Sandboxed checkout — specific ref
+  # ---------------------------------------------------------------
+  test-checkout-specific-ref:
+    name: "Test: checkout specific ref"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout with explicit ref
+        uses: ./
+        with:
+          checkout: true
+          checkout-ref: ${{ github.sha }}
+          checkout-path: /tmp/test-ref-checkout
+          run: |
+            cd /tmp/test-ref-checkout
+
+            # Verify we're at the expected commit
+            ACTUAL_SHA=$(git rev-parse HEAD)
+            EXPECTED_SHA="${{ github.sha }}"
+            if [[ "${ACTUAL_SHA}" != "${EXPECTED_SHA}" ]]; then
+              echo "FAIL: expected SHA ${EXPECTED_SHA}, got ${ACTUAL_SHA}"
+              exit 1
+            fi
+            echo "PASS: checked out correct commit ${ACTUAL_SHA}"
+          fs-read: "/tmp/test-ref-checkout"
+          network: blocked
